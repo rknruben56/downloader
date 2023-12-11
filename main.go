@@ -14,25 +14,23 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/wader/goutubedl"
 )
 
 var (
-	qURL            string
-	svc             *sqs.SQS
-	sess            *session.Session
-	uploader        *s3manager.Uploader
-	maxMsgCount     = 2
-	ytPath          = "yt-dlp"
-	downloadQuality = "best"
-	vIDParam        = "v"
+	qURL                  string
+	sqsClient             *sqs.SQS
+	snsClient             *sns.SNS
+	sess                  *session.Session
+	uploader              *s3manager.Uploader
+	maxMsgCount           = 2
+	ytPath                = "yt-dlp"
+	downloadQuality       = "best"
+	vIDParam              = "v"
+	downloadCompleteTopic string
 )
-
-// SNSMessage is the format the incoming message is in
-type SNSMessage struct {
-	Message string `json:"Message"`
-}
 
 func main() {
 	setupResources()
@@ -48,17 +46,28 @@ func main() {
 }
 
 func setupResources() {
+	// AWS Resources
 	sess := session.Must(session.NewSessionWithOptions(session.Options{
 		SharedConfigState: session.SharedConfigDisable,
 	}))
-	svc = sqs.New(sess)
-	qURL = os.Getenv("COPILOT_QUEUE_URI")
+	sqsClient = sqs.New(sess)
 	uploader = s3manager.NewUploader(sess)
+	snsClient = sns.New(sess)
+
+	// SNS Topic
+	topics := new(SNSTopics)
+	err := json.Unmarshal([]byte(os.Getenv("COPILOT_SNS_TOPIC_ARNS")), topics)
+	if err != nil {
+		fmt.Println("error reading topic from variables")
+	}
+	downloadCompleteTopic = topics.DownloadCompleteTopic
+
+	qURL = os.Getenv("COPILOT_QUEUE_URI")
 }
 
 func pollSqs(chn chan<- *sqs.Message) {
 	for {
-		result, err := svc.ReceiveMessage(&sqs.ReceiveMessageInput{
+		result, err := sqsClient.ReceiveMessage(&sqs.ReceiveMessageInput{
 			QueueUrl:            &qURL,
 			MaxNumberOfMessages: aws.Int64(int64(maxMsgCount)),
 			VisibilityTimeout:   aws.Int64(60),
@@ -93,11 +102,17 @@ func handleMessage(message *sqs.Message) {
 		return
 	}
 
-	fmt.Printf("Video processed: %s", videoID)
+	err = emitDownloadComplete(videoID)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Printf("Video processed: %s\n", videoID)
 }
 
 func getVideoID(message *sqs.Message) (string, error) {
-	snsMessage := new(SNSMessage)
+	snsMessage := new(Input)
 	err := json.Unmarshal([]byte(*message.Body), snsMessage)
 	if err != nil {
 		return "", err
@@ -149,8 +164,22 @@ func uploadToS3(key string, b *bytes.Buffer) error {
 	return nil
 }
 
+func emitDownloadComplete(videoID string) error {
+	output := Output{
+		VideoID: videoID,
+	}
+
+	message, _ := json.Marshal(output)
+	req, _ := snsClient.PublishRequest(&sns.PublishInput{
+		TopicArn: aws.String(downloadCompleteTopic),
+		Message:  aws.String(string(message)),
+	})
+
+	return req.Send()
+}
+
 func deleteMessage(message *sqs.Message) {
-	_, err := svc.DeleteMessage(&sqs.DeleteMessageInput{
+	_, err := sqsClient.DeleteMessage(&sqs.DeleteMessageInput{
 		QueueUrl:      &qURL,
 		ReceiptHandle: message.ReceiptHandle,
 	})

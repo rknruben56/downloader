@@ -27,7 +27,9 @@ subscribe:
   topics: 
     - name: downloadTopic
       service: api
-
+publish:
+  topics:
+    - name: downloadCompleteTopic
 # Optional fields for more advanced use-cases.
 #
 #variables:                    # Pass environment variables as key value pairs.
