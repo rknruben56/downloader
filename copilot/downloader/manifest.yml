@@ -30,6 +30,9 @@ subscribe:
 publish:
   topics:
     - name: downloadCompleteTopic
+
+network:
+  connect: true # Enable Service Connect for intra-environment traffic between services.
 # Optional fields for more advanced use-cases.
 #
 #variables:                    # Pass environment variables as key value pairs.

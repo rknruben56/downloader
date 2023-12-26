@@ -2,16 +2,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
-	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/rknruben56/downloader/download"
 	"github.com/rknruben56/downloader/transcode"
@@ -19,9 +20,7 @@ import (
 )
 
 var (
-	qURL                  string
 	sqsClient             *sqs.SQS
-	snsClient             *sns.SNS
 	sess                  *session.Session
 	maxMsgCount           = 2
 	ytPath                = "yt-dlp"
@@ -32,6 +31,10 @@ var (
 	downloader            download.Downloader
 	transcoder            transcode.Transcoder
 	uploader              upload.Uploader
+	snsTopicVar           = os.Getenv("COPILOT_SNS_TOPIC_ARNS")
+	queueURIVar           = os.Getenv("COPILOT_QUEUE_URI")
+	bucketNameVar         = os.Getenv("AUDIO_NAME")
+	serviceDiscoveryVar   = os.Getenv("COPILOT_SERVICE_DISCOVERY_ENDPOINT")
 )
 
 func main() {
@@ -53,23 +56,20 @@ func setupResources() {
 		SharedConfigState: session.SharedConfigDisable,
 	}))
 	sqsClient = sqs.New(sess)
-	snsClient = sns.New(sess)
 
 	// SNS Topic
 	topics := new(SNSTopics)
-	err := json.Unmarshal([]byte(os.Getenv("COPILOT_SNS_TOPIC_ARNS")), topics)
+	err := json.Unmarshal([]byte(snsTopicVar), topics)
 	if err != nil {
 		fmt.Println("error reading topic from variables")
 	}
 	downloadCompleteTopic = topics.DownloadCompleteTopic
 
-	qURL = os.Getenv("COPILOT_QUEUE_URI")
-
 	// Internal resources
 	downloader = &download.YTDownloader{Path: "yt-dlp"}
 	transcoder = &transcode.MP3Transcoder{}
 	uploader = &upload.MusicUploader{
-		BucketName: os.Getenv("AUDIO_NAME"),
+		BucketName: bucketNameVar,
 		Uploader:   s3manager.NewUploader(sess),
 		Sess:       sess,
 	}
@@ -78,7 +78,7 @@ func setupResources() {
 func pollSqs(chn chan<- *sqs.Message) {
 	for {
 		result, err := sqsClient.ReceiveMessage(&sqs.ReceiveMessageInput{
-			QueueUrl:            &qURL,
+			QueueUrl:            &queueURIVar,
 			MaxNumberOfMessages: aws.Int64(int64(maxMsgCount)),
 			VisibilityTimeout:   aws.Int64(60),
 			WaitTimeSeconds:     aws.Int64(int64(pollWaitTime)),
@@ -118,7 +118,12 @@ func handleMessage(message *sqs.Message) {
 		return
 	}
 
-	err = emitDownloadComplete(videoID, dResult.Title, url)
+	output := &Output{
+		VideoID: videoID,
+		Title:   dResult.Title,
+		URL:     url,
+	}
+	err = completeProcess(*output)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -146,25 +151,36 @@ func getVideoID(message *sqs.Message) (string, error) {
 	return params.Get(vIDParam), nil
 }
 
-func emitDownloadComplete(videoID string, title string, url string) error {
-	output := Output{
-		VideoID: videoID,
-		Title:   title,
-		URL:     url,
+func completeProcess(output Output) error {
+	b, err := json.Marshal(output)
+	if err != nil {
+		return err
 	}
 
-	message, _ := json.Marshal(output)
-	req, _ := snsClient.PublishRequest(&sns.PublishInput{
-		TopicArn: aws.String(downloadCompleteTopic),
-		Message:  aws.String(string(message)),
-	})
+	r, err := http.NewRequest("POST", fmt.Sprintf("http://api.%s/complete", serviceDiscoveryVar), bytes.NewBuffer(b))
+	if err != nil {
+		return err
+	}
 
-	return req.Send()
+	r.Header.Add("Content-Type", "application/json")
+	client := &http.Client{}
+	res, err := client.Do(r)
+	if err != nil {
+		return err
+	}
+
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("POST call failed. Status: %d", res.StatusCode)
+	}
+
+	return nil
 }
 
 func deleteMessage(message *sqs.Message) {
 	_, err := sqsClient.DeleteMessage(&sqs.DeleteMessageInput{
-		QueueUrl:      &qURL,
+		QueueUrl:      &queueURIVar,
 		ReceiptHandle: message.ReceiptHandle,
 	})
 	if err != nil {
