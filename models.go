@@ -8,6 +8,8 @@ type Input struct {
 // Output contains the video ID to emit
 type Output struct {
 	VideoID string `json:"videoID"`
+	Title   string `json:"title"`
+	URL     string `json:"url"`
 }
 
 // SNSTopics contains the topics this service can emit

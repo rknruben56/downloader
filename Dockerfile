@@ -1,5 +1,6 @@
 ARG GOLANG_VERSION=1.19.0
 ARG YT_DLP=2023.11.16
+ARG FFMPEG_VERSION=6.1
 
 # Build App
 FROM golang:${GOLANG_VERSION} as builder
@@ -17,6 +18,9 @@ RUN \
   curl -L https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP}/yt-dlp -o /yt-dlp && \
   chmod a+x /yt-dlp
 
+# Setup ffmpeg
+FROM mwader/static-ffmpeg:$FFMPEG_VERSION AS ffmpeg
+
 # Setup Image
 FROM debian:buster-slim
 RUN set -x && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q \
@@ -25,8 +29,10 @@ RUN set -x && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
 COPY --from=yt-dlp /yt-dlp /usr/local/bin/
+COPY --from=ffmpeg /ffmpeg /ffprobe /usr/local/bin/
 COPY --from=builder /app/downloader /app/downloader
 
-RUN yt-dlp --version
-
+RUN yt-dlp --version && \
+    ffmpeg -version && \
+    ffprobe -version
 ENTRYPOINT ["/app/downloader"]

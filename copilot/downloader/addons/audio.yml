@@ -4,12 +4,14 @@ Parameters:
     Description: Your application's name.
   Env:
     Type: String
-    Description: The name of the environment being deployed.
-
+    Description: The environment name your service, job, or workflow is being deployed to.
+  Name:
+    Type: String
+    Description: Your workload's name.
 Resources:
-  downloadsBucket:
+  audioBucket:
     Metadata:
-      'aws:copilot:description': 'An Amazon S3 bucket, downloads, for storing and retrieving objects'
+      'aws:copilot:description': 'An Amazon S3 bucket to store and retrieve objects for audio'
     Type: AWS::S3::Bucket
     Properties:
       VersioningConfiguration:
@@ -35,7 +37,7 @@ Resources:
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 1
 
-  downloadsBucketPolicy:
+  audioBucketPolicy:
     Metadata:
       'aws:copilot:description': 'A bucket policy to deny unencrypted access to the bucket and its contents'
     Type: AWS::S3::BucketPolicy
@@ -49,21 +51,43 @@ Resources:
             Principal: '*'
             Action: 's3:*'
             Resource: 
-              - !Sub ${ downloadsBucket.Arn}/*
-              - !Sub ${ downloadsBucket.Arn}
+              - !Sub ${ audioBucket.Arn}/*
+              - !Sub ${ audioBucket.Arn}
             Condition: 
               Bool:
                 "aws:SecureTransport": false
-      Bucket: !Ref downloadsBucket
+      Bucket: !Ref audioBucket
+
+  audioAccessPolicy:
+    Metadata:
+      'aws:copilot:description': 'An IAM ManagedPolicy for your service to access the audio bucket'
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: !Sub
+        - Grants CRUD access to the S3 bucket ${Bucket}
+        - { Bucket: !Ref audioBucket }
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3ObjectActions
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:PutObjectACL
+              - s3:PutObjectTagging
+              - s3:DeleteObject
+              - s3:RestoreObject
+            Resource: !Sub ${ audioBucket.Arn}/*
+          - Sid: S3ListAction
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub ${ audioBucket.Arn}
 
 Outputs:
-  downloadsName:
+  audioName:
     Description: "The name of a user-defined bucket."
-    Value: !Ref downloadsBucket
-    Export:
-      Name: !Sub ${App}-${Env}-downloadsBucketName
-  downloadsBucketARN:
-    Description: "The ARN of the downloads bucket."
-    Value: !GetAtt downloadsBucket.Arn
-    Export:
-      Name: !Sub ${App}-${Env}-downloadsBucketARN
+    Value: !Ref audioBucket
+  audioAccessPolicy:
+    Description: "The IAM::ManagedPolicy to attach to the task role"
+    Value: !Ref audioAccessPolicy

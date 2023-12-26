@@ -8,6 +8,10 @@ require (
 )
 
 require (
+	github.com/aws/aws-sdk-go-v2 v1.24.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/fatih/structs v1.1.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
+	github.com/modfy/fluent-ffmpeg v0.1.0 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
 )

@@ -2,12 +2,9 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 
@@ -16,7 +13,9 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/aws/aws-sdk-go/service/sqs"
-	"github.com/wader/goutubedl"
+	"github.com/rknruben56/downloader/download"
+	"github.com/rknruben56/downloader/transcode"
+	"github.com/rknruben56/downloader/upload"
 )
 
 var (
@@ -24,12 +23,15 @@ var (
 	sqsClient             *sqs.SQS
 	snsClient             *sns.SNS
 	sess                  *session.Session
-	uploader              *s3manager.Uploader
 	maxMsgCount           = 2
 	ytPath                = "yt-dlp"
 	downloadQuality       = "best"
 	vIDParam              = "v"
 	downloadCompleteTopic string
+	pollWaitTime          = 20
+	downloader            download.Downloader
+	transcoder            transcode.Transcoder
+	uploader              upload.Uploader
 )
 
 func main() {
@@ -51,7 +53,6 @@ func setupResources() {
 		SharedConfigState: session.SharedConfigDisable,
 	}))
 	sqsClient = sqs.New(sess)
-	uploader = s3manager.NewUploader(sess)
 	snsClient = sns.New(sess)
 
 	// SNS Topic
@@ -63,6 +64,15 @@ func setupResources() {
 	downloadCompleteTopic = topics.DownloadCompleteTopic
 
 	qURL = os.Getenv("COPILOT_QUEUE_URI")
+
+	// Internal resources
+	downloader = &download.YTDownloader{Path: "yt-dlp"}
+	transcoder = &transcode.MP3Transcoder{}
+	uploader = &upload.MusicUploader{
+		BucketName: os.Getenv("AUDIO_NAME"),
+		Uploader:   s3manager.NewUploader(sess),
+		Sess:       sess,
+	}
 }
 
 func pollSqs(chn chan<- *sqs.Message) {
@@ -71,7 +81,7 @@ func pollSqs(chn chan<- *sqs.Message) {
 			QueueUrl:            &qURL,
 			MaxNumberOfMessages: aws.Int64(int64(maxMsgCount)),
 			VisibilityTimeout:   aws.Int64(60),
-			WaitTimeSeconds:     aws.Int64(0),
+			WaitTimeSeconds:     aws.Int64(int64(pollWaitTime)),
 		})
 		if err != nil {
 			fmt.Println("error reading message", err)
@@ -90,19 +100,25 @@ func handleMessage(message *sqs.Message) {
 		return
 	}
 
-	b, err := downloadVideo(videoID)
+	dResult, err := downloader.Download(videoID)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	err = uploadToS3(videoID, b)
+	tBuff, err := transcoder.Transcode(dResult.Content)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	err = emitDownloadComplete(videoID)
+	url, err := uploader.Upload(videoID, tBuff)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	err = emitDownloadComplete(videoID, dResult.Title, url)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -130,43 +146,11 @@ func getVideoID(message *sqs.Message) (string, error) {
 	return params.Get(vIDParam), nil
 }
 
-func downloadVideo(url string) (*bytes.Buffer, error) {
-	b := &bytes.Buffer{}
-	goutubedl.Path = ytPath
-	result, err := goutubedl.New(context.Background(), url, goutubedl.Options{})
-	if err != nil {
-		return nil, err
-	}
-
-	downloadResult, err := result.Download(context.Background(), downloadQuality)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = io.Copy(b, downloadResult)
-	if err != nil {
-		return nil, err
-	}
-
-	return b, err
-}
-
-func uploadToS3(key string, b *bytes.Buffer) error {
-	_, err := uploader.Upload(&s3manager.UploadInput{
-		Bucket: aws.String(os.Getenv("DOWNLOADS_NAME_BUCKET_NAME")),
-		Key:    aws.String(key),
-		Body:   b,
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func emitDownloadComplete(videoID string) error {
+func emitDownloadComplete(videoID string, title string, url string) error {
 	output := Output{
 		VideoID: videoID,
+		Title:   title,
+		URL:     url,
 	}
 
 	message, _ := json.Marshal(output)
